@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Secrets
+.env
+.env.*
+
+# AI / Database storage
+chroma_db/
+*.db
+models/
+
+# Uploaded repositories and temporary files
+uploads/
+temp/
+
+# IDE
+.vscode/
+.idea/
+
+# Node (future frontend)
+node_modules/
+dist/
