@@ -24,3 +24,5 @@ temp/
 # Node (future frontend)
 node_modules/
 dist/
+
+backend/temp_repos/
