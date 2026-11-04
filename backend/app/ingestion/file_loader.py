@@ -11,7 +11,8 @@ SUPPORTED_EXTENSIONS = {
 IGNORED_DIRS = {
     ".git", "node_modules", "venv", ".venv",
     "__pycache__", "dist", "build",
-    ".idea", ".next", "coverage"
+    ".idea", ".next", "coverage",
+    "temp_repos", "chroma_db"
 }
 
 IGNORED_FILES = {
