@@ -4,6 +4,9 @@ from pydantic import BaseModel
 from app.llm import ask_llm
 from app.ingestion.github_loader import clone_github_repo
 from app.ingestion.file_loader import scan_repository
+from app.rag.chunker import create_code_chunks
+from app.rag.vector_store import store_code_chunks
+from app.rag.qa import answer_codebase_question
 
 app = FastAPI(
     title="CodeSage",
@@ -39,17 +42,22 @@ def ask_question(request: ChatRequest):
 class RepositoryRequest(BaseModel):
     github_url: str
 
-
+class RepositoryQuestionRequest(BaseModel):
+    question: str
 @app.post("/repository/scan")
 def scan_github_repository(request: RepositoryRequest):
     try:
         repo_path = clone_github_repo(request.github_url)
         files = scan_repository(repo_path)
+        chunks = create_code_chunks(files)
+        store_code_chunks(chunks)
 
         return {
-            "message": "Repository scanned successfully",
+            "message": "Repository scanned and indexed successfully",
             "repository_path": repo_path,
             "total_files": len(files),
+            "total_chunks": len(chunks),
+            
             "files": [
                 {
                     "file_path": file["file_path"],
@@ -58,6 +66,7 @@ def scan_github_repository(request: RepositoryRequest):
                 }
                 for file in files
             ]
+            
         }
 
     except ValueError as e:
@@ -67,4 +76,19 @@ def scan_github_repository(request: RepositoryRequest):
         raise HTTPException(
             status_code=500,
             detail="Repository scanning failed"
+        )
+@app.post("/repository/ask")
+def ask_repository_question(request: RepositoryQuestionRequest):
+    try:
+        answer = answer_codebase_question(request.question)
+
+        return {
+            "question": request.question,
+            "answer": answer
+        }
+
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to answer repository question"
         )
