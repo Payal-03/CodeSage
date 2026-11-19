@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+.pytest_cache/
 
 # Secrets
 .env
@@ -16,13 +17,17 @@ models/
 # Uploaded repositories and temporary files
 uploads/
 temp/
+backend/temp_repos/
+
+# Local Tree-sitter binary caches (platform-specific DLLs / archives)
+backend/app/ingestion/parsers/
+.tree_sitter_cache/
 
 # IDE
 .vscode/
 .idea/
 
-# Node (future frontend)
+# Frontend / Node
 node_modules/
 dist/
-
-backend/temp_repos/
+.streamlit/

@@ -1,9 +1,9 @@
 import re
+from pathlib import Path
 from rank_bm25 import BM25Okapi
 import chromadb
 
 from app.rag.embeddings import generate_embeddings
-
 
 # Create a persistent ChromaDB database
 client = chromadb.PersistentClient(
@@ -16,40 +16,92 @@ collection = client.get_or_create_collection(
 )
 
 
-def store_code_chunks(chunks):
+def _build_contextual_text(chunk: dict) -> str:
+    """
+    Enriches raw code with file path and symbol metadata for dense vector embedding.
+    This significantly improves semantic retrieval relevance.
+    """
+    file_path = chunk.get("file_path", "")
+    name = chunk.get("name", "")
+    ctype = chunk.get("type", "")
+    content = chunk.get("content", "")
+
+    header = f"# File: {file_path}\n# Symbol: {name} ({ctype})\n"
+    return f"{header}{content}"
+
+
+def tokenize(text: str) -> list[str]:
+    """
+    Code-aware tokenizer for BM25 keyword search.
+    Splits identifiers on snake_case, camelCase, and dots so partial names match.
+    """
+    tokens = set()
+    # Extract words
+    words = re.findall(r"[A-Za-z0-9_]+", text.lower())
+    for word in words:
+        tokens.add(word)
+        # Split snake_case
+        if "_" in word:
+            for part in word.split("_"):
+                if part:
+                    tokens.add(part)
+        # Split camelCase / numbers
+        subwords = re.findall(r"[a-z]+|[0-9]+", word)
+        for sub in subwords:
+            if len(sub) > 1:
+                tokens.add(sub)
+    return list(tokens)
+
+
+def store_code_chunks(chunks: list[dict]):
+    """
+    Stores code chunks into ChromaDB with dense embeddings and metadata.
+    Completely resets existing collection chunks to prevent ghost entries.
+    """
+    global collection
     if not chunks:
         return
 
-    texts = [
+    # Reset collection cleanly to avoid orphaned IDs from previous scans
+    try:
+        client.delete_collection("codesage_code")
+    except Exception:
+        pass
+    collection = client.get_or_create_collection(name="codesage_code")
+
+    # Build contextual text representations for embeddings
+    contextual_texts = [
+        _build_contextual_text(chunk)
+        for chunk in chunks
+    ]
+    raw_documents = [
         chunk["content"]
         for chunk in chunks
     ]
 
-    embeddings = generate_embeddings(texts)
+    embeddings = generate_embeddings(contextual_texts)
 
     ids = [
-        f"chunk_{i}"
+        f"chunk_{i}_{chunks[i]['type']}_{Path(chunks[i]['file_path']).stem}"
         for i in range(len(chunks))
     ]
 
     metadatas = [
         {
-            "file_path": chunk["file_path"],
-            "name": chunk["name"],
-            "type": chunk["type"],
-            "start_line": chunk["start_line"],
-            "end_line": chunk["end_line"]
+            "file_path": str(chunk.get("file_path", "")),
+            "name": str(chunk.get("name", "")),
+            "type": str(chunk.get("type", "")),
+            "start_line": int(chunk.get("start_line", 1)),
+            "end_line": int(chunk.get("end_line", 1))
         }
         for chunk in chunks
     ]
-    existing_ids = collection.get()["ids"]
-    if existing_ids:
-        collection.delete(ids=existing_ids)
 
+    # Batch upsert into ChromaDB
     collection.upsert(
         ids=ids,
         embeddings=embeddings,
-        documents=texts,
+        documents=raw_documents,
         metadatas=metadatas
     )
 
@@ -57,46 +109,63 @@ def store_code_chunks(chunks):
 
 
 def search_code(query: str, n_results: int = 3):
+    """
+    Performs dense semantic vector search via ChromaDB embeddings.
+    """
+    count = collection.count()
+    if count == 0:
+        return []
+
+    effective_n = min(n_results, count)
     query_embedding = generate_embeddings([query])[0]
 
     results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=n_results
+        n_results=effective_n
     )
 
     matches = []
-
-    for i in range(len(results["ids"][0])):
-        matches.append({
-            "content": results["documents"][0][i],
-            "metadata": results["metadatas"][0][i],
-            "distance": results["distances"][0][i]
-        })
+    if results and results.get("ids") and results["ids"][0]:
+        for i in range(len(results["ids"][0])):
+            matches.append({
+                "content": results["documents"][0][i],
+                "metadata": results["metadatas"][0][i],
+                "distance": float(results["distances"][0][i])
+            })
 
     return matches
-def tokenize(text: str):
-    return re.findall(r"\b\w+\b", text.lower())
 
 
 def search_bm25(query: str, n_results: int = 3):
+    """
+    Performs BM25 lexical keyword search over stored repository documents.
+    """
+    count = collection.count()
+    if count == 0:
+        return []
+
     data = collection.get(
-        include=["documents", "metadatas"]
+        include=["documents", "metadatas"],
+        limit=count
     )
 
-    documents = data["documents"]
-    metadatas = data["metadatas"]
+    documents = data.get("documents", [])
+    metadatas = data.get("metadatas", [])
 
     if not documents:
         return []
 
+    # Tokenize each document
     tokenized_documents = [
-        tokenize(document)
-        for document in documents
+        tokenize(f"{meta.get('file_path', '')} {meta.get('name', '')}\n{doc}")
+        for doc, meta in zip(documents, metadatas)
     ]
 
     bm25 = BM25Okapi(tokenized_documents)
-
     query_tokens = tokenize(query)
+    if not query_tokens:
+        return []
+
     scores = bm25.get_scores(query_tokens)
 
     ranked_indices = sorted(
@@ -106,44 +175,48 @@ def search_bm25(query: str, n_results: int = 3):
     )
 
     results = []
+    effective_n = min(n_results, len(ranked_indices))
 
-    for index in ranked_indices[:n_results]:
-        results.append({
-            "content": documents[index],
-            "metadata": metadatas[index],
-            "score": float(scores[index])
-        })
+    for index in ranked_indices[:effective_n]:
+        # Only include non-zero scoring matches if possible
+        if scores[index] > 0 or len(results) == 0:
+            results.append({
+                "content": documents[index],
+                "metadata": metadatas[index],
+                "score": float(scores[index])
+            })
 
     return results
 
+
 def search_hybrid(
     query: str,
-    n_results: int = 3,
+    n_results: int = 5,
     candidate_k: int = 10,
     rrf_k: int = 60
 ):
-    semantic_results = search_code(
-        query,
-        n_results=candidate_k
-    )
+    """
+    Performs Hybrid Search combining Dense Vector Search and BM25 Keyword Search
+    fused with Reciprocal Rank Fusion (RRF).
+    """
+    count = collection.count()
+    if count == 0:
+        return []
 
-    keyword_results = search_bm25(
-        query,
-        n_results=candidate_k
-    )
+    effective_k = min(candidate_k, count)
+
+    semantic_results = search_code(query, n_results=effective_k)
+    keyword_results = search_bm25(query, n_results=effective_k)
 
     combined_results = {}
-
     search_lists = [
-        semantic_results,
-        keyword_results
+        ("semantic", semantic_results),
+        ("keyword", keyword_results)
     ]
 
-    for results in search_lists:
+    for mode, results in search_lists:
         for rank, result in enumerate(results, start=1):
-
             metadata = result["metadata"]
-
             key = (
                 metadata["file_path"],
                 metadata["name"],
@@ -154,12 +227,12 @@ def search_hybrid(
                 combined_results[key] = {
                     "content": result["content"],
                     "metadata": metadata,
-                    "rrf_score": 0.0
+                    "rrf_score": 0.0,
+                    "matched_by": []
                 }
 
-            combined_results[key]["rrf_score"] += (
-                1 / (rrf_k + rank)
-            )
+            combined_results[key]["rrf_score"] += 1.0 / (rrf_k + rank)
+            combined_results[key]["matched_by"].append(mode)
 
     ranked_results = sorted(
         combined_results.values(),

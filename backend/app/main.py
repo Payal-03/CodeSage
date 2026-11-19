@@ -1,4 +1,5 @@
 
+from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from app.llm import ask_llm
@@ -7,6 +8,7 @@ from app.ingestion.file_loader import scan_repository
 from app.rag.chunker import create_code_chunks
 from app.rag.vector_store import store_code_chunks
 from app.rag.qa import answer_codebase_question
+from app.analyzers.bug_investigator import investigate_bug
 
 app = FastAPI(
     title="CodeSage",
@@ -80,15 +82,36 @@ def scan_github_repository(request: RepositoryRequest):
 @app.post("/repository/ask")
 def ask_repository_question(request: RepositoryQuestionRequest):
     try:
-        answer = answer_codebase_question(request.question)
+        qa_result = answer_codebase_question(request.question, return_sources=True)
 
         return {
             "question": request.question,
-            "answer": answer
+            "answer": qa_result["answer"],
+            "sources": qa_result.get("sources", [])
         }
 
-    except Exception:
+    except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail="Failed to answer repository question"
+            detail=f"Failed to answer repository question: {str(e)}"
+        )
+
+
+class BugInvestigationRequest(BaseModel):
+    bug_description: str
+    error_trace: Optional[str] = None
+
+
+@app.post("/repository/investigate-bug")
+def investigate_repository_bug(request: BugInvestigationRequest):
+    try:
+        report = investigate_bug(
+            bug_description=request.bug_description,
+            error_trace=request.error_trace
+        )
+        return report
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Bug investigation failed: {str(e)}"
         )
