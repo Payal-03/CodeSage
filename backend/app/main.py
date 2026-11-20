@@ -46,20 +46,23 @@ class RepositoryRequest(BaseModel):
 
 class RepositoryQuestionRequest(BaseModel):
     question: str
+    repo_id: Optional[str] = None
+
 @app.post("/repository/scan")
 def scan_github_repository(request: RepositoryRequest):
     try:
         repo_path = clone_github_repo(request.github_url)
         files = scan_repository(repo_path)
         chunks = create_code_chunks(files)
-        store_code_chunks(chunks)
+        repo_id = request.github_url
+        store_code_chunks(chunks, repo_id=repo_id)
 
         return {
             "message": "Repository scanned and indexed successfully",
             "repository_path": repo_path,
+            "repo_id": repo_id,
             "total_files": len(files),
             "total_chunks": len(chunks),
-            
             "files": [
                 {
                     "file_path": file["file_path"],
@@ -68,7 +71,6 @@ def scan_github_repository(request: RepositoryRequest):
                 }
                 for file in files
             ]
-            
         }
 
     except ValueError as e:
@@ -79,10 +81,11 @@ def scan_github_repository(request: RepositoryRequest):
             status_code=500,
             detail="Repository scanning failed"
         )
+
 @app.post("/repository/ask")
 def ask_repository_question(request: RepositoryQuestionRequest):
     try:
-        qa_result = answer_codebase_question(request.question, return_sources=True)
+        qa_result = answer_codebase_question(request.question, repo_id=request.repo_id, return_sources=True)
 
         return {
             "question": request.question,
@@ -100,6 +103,7 @@ def ask_repository_question(request: RepositoryQuestionRequest):
 class BugInvestigationRequest(BaseModel):
     bug_description: str
     error_trace: Optional[str] = None
+    repo_id: Optional[str] = None
 
 
 @app.post("/repository/investigate-bug")
@@ -107,7 +111,8 @@ def investigate_repository_bug(request: BugInvestigationRequest):
     try:
         report = investigate_bug(
             bug_description=request.bug_description,
-            error_trace=request.error_trace
+            error_trace=request.error_trace,
+            repo_id=request.repo_id
         )
         return report
     except Exception as e:

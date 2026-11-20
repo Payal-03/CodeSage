@@ -1,6 +1,20 @@
 from pathlib import Path
 
 
+def is_test_file(file_path: str) -> bool:
+    """Identifies test files by path and naming convention."""
+    p = Path(file_path)
+    name = p.name.lower()
+    parts = [part.lower() for part in p.parts]
+    return (
+        name.startswith("test_")
+        or name.endswith("_test.py")
+        or "tests" in parts
+        or "test" in parts
+        or name in ("test_parser.py", "test_chunker.py")
+    )
+
+
 def create_code_chunks(files: list[dict], max_fallback_lines: int = 60) -> list[dict]:
     """
     Transforms scanned repository files and parsed AST symbols into searchable code chunks.
@@ -12,6 +26,7 @@ def create_code_chunks(files: list[dict], max_fallback_lines: int = 60) -> list[
     - Classes (with decorators)
     - Methods (with qualified names like ClassName.method_name)
     - Files without symbols (Markdown, configs, procedural scripts) chunked by line blocks
+    - Adds `is_test` metadata flag to differentiate test files from implementation files
     """
     chunks = []
 
@@ -20,6 +35,7 @@ def create_code_chunks(files: list[dict], max_fallback_lines: int = 60) -> list[
         content = file.get("content", "")
         symbols = file.get("symbols", [])
         total_lines = file.get("total_lines", len(content.splitlines()))
+        is_test = is_test_file(file_path)
 
         if not content.strip():
             continue
@@ -51,7 +67,8 @@ def create_code_chunks(files: list[dict], max_fallback_lines: int = 60) -> list[
                     "type": sym_type,
                     "start_line": start,
                     "end_line": end,
-                    "content": code
+                    "content": code,
+                    "is_test": is_test
                 })
 
             # Consolidate imports into a single contextual chunk per file
@@ -69,7 +86,8 @@ def create_code_chunks(files: list[dict], max_fallback_lines: int = 60) -> list[
                     "type": "imports",
                     "start_line": min_line,
                     "end_line": max_line,
-                    "content": import_code
+                    "content": import_code,
+                    "is_test": is_test
                 })
 
         else:
@@ -93,7 +111,8 @@ def create_code_chunks(files: list[dict], max_fallback_lines: int = 60) -> list[
                     "type": "file_block",
                     "start_line": start_l,
                     "end_line": end_l,
-                    "content": chunk_code
+                    "content": chunk_code,
+                    "is_test": is_test
                 })
 
     return chunks

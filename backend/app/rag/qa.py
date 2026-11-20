@@ -1,3 +1,4 @@
+from typing import Optional
 from app.rag.vector_store import search_hybrid
 from app.llm import ask_llm
 
@@ -26,13 +27,14 @@ ANSWER:
 """
 
 
-def answer_codebase_question(question: str, return_sources: bool = False):
+def answer_codebase_question(question: str, repo_id: Optional[str] = None, return_sources: bool = False):
     """
     Retrieves relevant code chunks using Hybrid Search (Vector + BM25 via RRF),
     builds grounded context, and answers the question with LLM.
     """
     results = search_hybrid(
         question,
+        repo_id=repo_id,
         n_results=5
     )
 

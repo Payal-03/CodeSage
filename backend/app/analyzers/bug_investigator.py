@@ -4,7 +4,11 @@ from app.rag.vector_store import search_hybrid
 from app.llm import ask_llm
 
 
-def investigate_bug(bug_description: str, error_trace: Optional[str] = None) -> dict:
+def investigate_bug(
+    bug_description: str,
+    error_trace: Optional[str] = None,
+    repo_id: Optional[str] = None
+) -> dict:
     """
     Performs read-only bug investigation on the indexed codebase:
     1. Extracts search terms from bug description and stack traces.
@@ -22,7 +26,7 @@ def investigate_bug(bug_description: str, error_trace: Optional[str] = None) -> 
     combined_query = " ".join(query_parts)
 
     # Retrieve candidate code
-    results = search_hybrid(combined_query, n_results=5)
+    results = search_hybrid(combined_query, repo_id=repo_id, n_results=5)
 
     if not results:
         return {
