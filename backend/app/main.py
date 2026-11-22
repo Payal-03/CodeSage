@@ -1,14 +1,6 @@
-
 from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from app.llm import ask_llm
-from app.ingestion.github_loader import clone_github_repo
-from app.ingestion.file_loader import scan_repository
-from app.rag.chunker import create_code_chunks
-from app.rag.vector_store import store_code_chunks
-from app.rag.qa import answer_codebase_question
-from app.analyzers.bug_investigator import investigate_bug
 
 app = FastAPI(
     title="CodeSage",
@@ -16,8 +8,10 @@ app = FastAPI(
     version="0.1.0"
 )
 
+
 class ChatRequest(BaseModel):
     question: str
+
 
 @app.get("/")
 def home():
@@ -26,13 +20,16 @@ def home():
         "status": "running"
     }
 
+
 @app.get("/health")
 def health():
     return {"status": "healthy"}
 
+
 @app.post("/ask")
 def ask_question(request: ChatRequest):
     try:
+        from app.llm import ask_llm
         answer = ask_llm(request.question)
         return {
             "question": request.question,
@@ -41,16 +38,24 @@ def ask_question(request: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 class RepositoryRequest(BaseModel):
     github_url: str
+
 
 class RepositoryQuestionRequest(BaseModel):
     question: str
     repo_id: Optional[str] = None
 
+
 @app.post("/repository/scan")
 def scan_github_repository(request: RepositoryRequest):
     try:
+        from app.ingestion.github_loader import clone_github_repo
+        from app.ingestion.file_loader import scan_repository
+        from app.rag.chunker import create_code_chunks
+        from app.rag.vector_store import store_code_chunks
+
         repo_path = clone_github_repo(request.github_url)
         files = scan_repository(repo_path)
         chunks = create_code_chunks(files)
@@ -82,9 +87,11 @@ def scan_github_repository(request: RepositoryRequest):
             detail="Repository scanning failed"
         )
 
+
 @app.post("/repository/ask")
 def ask_repository_question(request: RepositoryQuestionRequest):
     try:
+        from app.rag.qa import answer_codebase_question
         qa_result = answer_codebase_question(request.question, repo_id=request.repo_id, return_sources=True)
 
         return {
@@ -109,6 +116,7 @@ class BugInvestigationRequest(BaseModel):
 @app.post("/repository/investigate-bug")
 def investigate_repository_bug(request: BugInvestigationRequest):
     try:
+        from app.analyzers.bug_investigator import investigate_bug
         report = investigate_bug(
             bug_description=request.bug_description,
             error_trace=request.error_trace,

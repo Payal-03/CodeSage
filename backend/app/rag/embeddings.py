@@ -1,6 +1,5 @@
 import os
 from functools import lru_cache
-from sentence_transformers import SentenceTransformer
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 
@@ -8,9 +7,10 @@ MODEL_NAME = "all-MiniLM-L6-v2"
 @lru_cache(maxsize=1)
 def get_embedding_model():
     """
-    Loads SentenceTransformer embedding model.
+    Loads SentenceTransformer embedding model lazily upon first use.
     Tries cached weights first to prevent repeated HuggingFace Hub network retries.
     """
+    from sentence_transformers import SentenceTransformer
     try:
         return SentenceTransformer(MODEL_NAME, local_files_only=True)
     except Exception:
