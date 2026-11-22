@@ -31,11 +31,17 @@ def answer_codebase_question(question: str, repo_id: Optional[str] = None, retur
     """
     Retrieves relevant code chunks using Hybrid Search (Vector + BM25 via RRF),
     builds grounded context, and answers the question with LLM.
+    Uses intent-aware context sizing (5 chunks for single-symbol, 7 for architectural).
     """
+    from app.rag.intent import classify_query_intent, ARCHITECTURAL
+    detected_intent = classify_query_intent(question)
+    target_n = 7 if detected_intent == ARCHITECTURAL else 5
+
     results = search_hybrid(
         question,
         repo_id=repo_id,
-        n_results=5
+        n_results=target_n,
+        intent=detected_intent
     )
 
     if not results:

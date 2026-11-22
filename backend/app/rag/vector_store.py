@@ -6,9 +6,21 @@ from rank_bm25 import BM25Okapi
 import chromadb
 
 from app.rag.embeddings import generate_embeddings
+from app.rag.intent import (
+    SINGLE_SYMBOL,
+    ARCHITECTURAL,
+    DEBUGGING,
+    classify_query_intent,
+    is_explicit_test_query,
+)
 
 DEFAULT_COLLECTION = "codesage_default"
 _ACTIVE_REPO: Optional[str] = None
+
+# Sensible constants for retrieval budgeting
+CANDIDATE_POOL_ARCHITECTURAL = 25
+CANDIDATE_POOL_DEFAULT = 10
+MAX_CHUNKS_PER_FILE_ARCHITECTURAL = 2
 
 # Create a persistent ChromaDB database
 client = chromadb.PersistentClient(
@@ -338,23 +350,135 @@ def search_bm25(query: str, repo_id: Optional[str] = None, n_results: int = 3):
     return results
 
 
-def is_explicit_test_query(query: str) -> bool:
-    """Detects if user is explicitly asking about tests, testing, specs, or assertions."""
-    pattern = r"\b(test|tests|testing|testcase|testcases|spec|specs|assert|assertion|assertions|unit\s*test|integration\s*test|mock|mocking)\b"
-    return bool(re.search(pattern, query.lower()))
+def _apply_stratified_file_diversity(
+    ranked_chunks: list[dict],
+    target_n: int = 7,
+    max_per_file: int = 2,
+    is_test_query: bool = False
+) -> list[dict]:
+    """
+    Selects up to target_n chunks from ranked_chunks with file diversity.
+    Initially limits each file to max_per_file chunks in relevance order.
+    For non-test architectural queries, prioritizes production-code chunks
+    before falling back to test chunks if candidate pool has insufficient
+    production files.
+    """
+    if len(ranked_chunks) <= max_per_file or target_n <= 0:
+        return ranked_chunks[:target_n]
+
+    from app.rag.chunker import is_test_file
+
+    if is_test_query:
+        # User explicitly asked about tests: standard stratified diversity
+        selected = []
+        selected_indices = set()
+        file_counts: dict[str, int] = {}
+
+        for idx, chunk in enumerate(ranked_chunks):
+            fpath = chunk.get("metadata", {}).get("file_path", "unknown")
+            count = file_counts.get(fpath, 0)
+            if count < max_per_file:
+                selected.append(chunk)
+                selected_indices.add(idx)
+                file_counts[fpath] = count + 1
+                if len(selected) >= target_n:
+                    break
+
+        if len(selected) < target_n:
+            for idx, chunk in enumerate(ranked_chunks):
+                if idx not in selected_indices:
+                    selected.append(chunk)
+                    selected_indices.add(idx)
+                    if len(selected) >= target_n:
+                        break
+
+        return selected
+
+    # Non-test architectural query: Production-First Stratification
+    prod_chunks = []
+    test_chunks = []
+    for chunk in ranked_chunks:
+        meta = chunk.get("metadata", {})
+        fpath = meta.get("file_path", "")
+        is_t = meta.get("is_test")
+        if is_t is None:
+            is_t = is_test_file(fpath)
+        if is_t:
+            test_chunks.append(chunk)
+        else:
+            prod_chunks.append(chunk)
+
+    selected = []
+    file_counts = {}
+
+    # Pass 1: Diverse production chunks (max_per_file per file)
+    for chunk in prod_chunks:
+        fpath = chunk.get("metadata", {}).get("file_path", "unknown")
+        count = file_counts.get(fpath, 0)
+        if count < max_per_file:
+            selected.append(chunk)
+            file_counts[fpath] = count + 1
+            if len(selected) >= target_n:
+                break
+
+    # Pass 2: Remaining production chunks in relevance order if target_n not met
+    if len(selected) < target_n:
+        for chunk in prod_chunks:
+            if chunk not in selected:
+                selected.append(chunk)
+                if len(selected) >= target_n:
+                    break
+
+    # Pass 3: Test chunks fallback (up to max_per_file) if still not enough production chunks
+    if len(selected) < target_n:
+        for chunk in test_chunks:
+            fpath = chunk.get("metadata", {}).get("file_path", "unknown")
+            count = file_counts.get(fpath, 0)
+            if count < max_per_file:
+                selected.append(chunk)
+                file_counts[fpath] = count + 1
+                if len(selected) >= target_n:
+                    break
+
+    # Pass 4: Any remaining test chunks if candidate pool is very small
+    if len(selected) < target_n:
+        for chunk in test_chunks:
+            if chunk not in selected:
+                selected.append(chunk)
+                if len(selected) >= target_n:
+                    break
+
+    return selected
 
 
 def search_hybrid(
     query: str,
     repo_id: Optional[str] = None,
     n_results: int = 5,
-    candidate_k: int = 10,
-    rrf_k: int = 60
+    candidate_k: Optional[int] = None,
+    rrf_k: int = 60,
+    intent: Optional[str] = None,
+    max_per_file: int = MAX_CHUNKS_PER_FILE_ARCHITECTURAL
 ):
     """
     Performs Hybrid Search combining Dense Vector Search and BM25 Keyword Search
-    fused with Reciprocal Rank Fusion (RRF) and test-aware intent weighting.
+    fused with Reciprocal Rank Fusion (RRF), test-aware intent weighting, and
+    stratified multi-file retrieval for architectural queries.
     """
+    detected_intent = intent or classify_query_intent(query)
+
+    # Determine candidate pool size based on intent
+    if candidate_k is None:
+        effective_candidate_k = (
+            CANDIDATE_POOL_ARCHITECTURAL
+            if detected_intent == ARCHITECTURAL
+            else CANDIDATE_POOL_DEFAULT
+        )
+    else:
+        effective_candidate_k = candidate_k
+
+    effective_candidate_k = max(effective_candidate_k, n_results)
+
     collection_name = get_collection_name(repo_id)
     try:
         coll = client.get_collection(name=collection_name)
@@ -372,7 +496,7 @@ def search_hybrid(
     if count == 0:
         return []
 
-    effective_k = min(candidate_k, count)
+    effective_k = min(effective_candidate_k, count)
 
     semantic_results = search_code(query, repo_id=repo_id, n_results=effective_k)
     keyword_results = search_bm25(query, repo_id=repo_id, n_results=effective_k)
@@ -404,27 +528,38 @@ def search_hybrid(
             combined_results[key]["matched_by"].append(mode)
 
     # Test-aware intent routing:
-    # If user asks an ordinary implementation question, apply gentle dampening (0.65)
-    # to test files so that actual production functions rank highest.
-    # If user explicitly asks about tests, boost test chunks (1.25) so they rank top.
+    # If user explicitly asks about tests, boost test chunks (1.5) so they rank top.
+    # For architectural queries, apply stronger dampening (0.25) so test chunks don't
+    # displace core production files; for single-symbol queries keep gentle (0.65).
     is_test_q = is_explicit_test_query(query)
+    test_dampening = 0.25 if detected_intent == ARCHITECTURAL else 0.65
+    from app.rag.chunker import is_test_file
 
     for item in combined_results.values():
         meta = item["metadata"]
-        fpath = meta.get("file_path", "").lower()
-        is_test_chunk = meta.get("is_test", False) or "test" in fpath
+        fpath = meta.get("file_path", "")
+        is_t = meta.get("is_test")
+        is_test_chunk = is_t if is_t is not None else is_test_file(fpath)
 
         if is_test_q:
             if is_test_chunk:
                 item["rrf_score"] *= 1.5
         else:
             if is_test_chunk:
-                item["rrf_score"] *= 0.65
+                item["rrf_score"] *= test_dampening
 
     ranked_results = sorted(
         combined_results.values(),
         key=lambda item: item["rrf_score"],
         reverse=True
     )
+
+    if detected_intent == ARCHITECTURAL:
+        return _apply_stratified_file_diversity(
+            ranked_results,
+            target_n=n_results,
+            max_per_file=max_per_file,
+            is_test_query=is_test_q
+        )
 
     return ranked_results[:n_results]
